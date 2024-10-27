@@ -14,6 +14,6 @@ I started with open-ai's GPT2 113M checkpoint, used FineWeb-1B subsample with 51
 ![image](https://github.com/user-attachments/assets/eae623c3-7801-4cd0-a5e8-289bf84c0133)
 
 
-Reason for the blind test is to make sure it's not actually pattern matching as it doesn't have a context of what it's adding these positional residuals to, but we technically should want it to know as the embedding space is not as structured as typical contrasive ones go...
+Reason for the blind test is to make sure it's not actually pattern matching what is statistically likely to come after, since on the blind version it doesn't have a context of what it's generating these positional residuals for, but we technically should want it to know as the embedding space is not as structured as typical contrasive ones go...
 
 (I plan to work on this soon, this is a rushed reproduction of a previous work i did , but accidentally deleted)
