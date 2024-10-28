@@ -13,7 +13,7 @@ import torch.nn as nn
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, functional as F
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 @dataclass
@@ -31,12 +31,8 @@ class FutureProbeGPT2(GPT2LMHeadModel):
         super(FutureProbeGPT2, self).__init__(*args, **kwargs)
         # model_dim 
         model_dim = self.config.n_embd
-        self.oracle = nn.Sequential(
-            nn.LayerNorm(model_dim),
-            nn.Linear(model_dim, model_dim),
-            nn.SiLU(),
-            nn.Linear(model_dim, 3*model_dim),
-        )
+        self.oracle = nn.LSTM(model_dim, model_dim * 4, batch_first=True)
+        self.cell_state = nn.Parameter(torch.randn((1, 1, model_dim * 4)))
         
         # disable gradients for lm_head
         for param in self.lm_head.parameters():
@@ -85,14 +81,16 @@ class FutureProbeGPT2(GPT2LMHeadModel):
 
             # lm_logits = self.lm_head(hidden_states)
             # future projection
-            future_logits = self.oracle((hidden_states.detach()))  # or torch.randn_like for blind tests
-            # chunk the future logits
-            future_logits = future_logits.chunk(FUTURE_LOOK, dim=-1)
-            future_logits = [f + hidden_states.detach() for f in future_logits]
-            # stack the future logits
-            future_logits = torch.stack(future_logits, dim=1)
-            
-            hidden_states = torch.cat([hidden_states[:, None, ...], future_logits], dim=1)
+
+            hidden_sub = hidden_states[:-FUTURE_LOOK]
+
+            embds = self.transformer.wte(input_ids)
+            embds = torch.stack([embds[i:(i - FUTURE_LOOK) or None] for i in range(1, FUTURE_LOOK + 1)], 2)
+            embds = embds.flatten(0, 1)
+            hidden_flat = hidden_sub.flatten(0, 1).unsqueeze(0)
+            future_logits, _ = self.oracle(embds, (hidden_flat, self.cell_state.expand(-1, hidden_flat.size(1), -1)))
+            future_logits = future_logits.vieW(*hidden_sub.shape[:2], FUTURE_LOOK, -1).unbind(-2)
+            hidden_states = torch.stack([hidden_sub, *future_logits], dim=1)
 
             # pass the future logits through the main head without grad
             lm_logits = self.lm_head(hidden_states) # (B, FUTURE_LOOK, S, V)
@@ -102,15 +100,8 @@ class FutureProbeGPT2(GPT2LMHeadModel):
             loss = None
             losses = []
             if labels is not None:
-                
-                for i in range(lm_logits.size(1)):
-                    shift_logits = lm_logits[:, i, :-(1 + i), :].contiguous()
-                    shift_labels = labels[..., (1 + i):].contiguous()
-                    loss_fct = CrossEntropyLoss()
-                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-                    losses.append(loss)
-
-                loss = torch.stack(losses).mean()
+                new_labels = torch.stack([labels[i:(i - FUTURE_LOOK) or None] for i in range(0, FUTURE_LOOK + 1)], 1)
+                loss = F.cross_entropy(lm_logits.flatten(0, -2), new_labels.flatten())
                
 
             if not return_dict:
